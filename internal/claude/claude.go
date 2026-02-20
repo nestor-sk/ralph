@@ -15,48 +15,41 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/events"
 	"github.com/uesteibar/ralph/internal/shell"
 )
 
-const completeSignal = "<promise>COMPLETE</promise>"
-
-// InvokeOpts configures a Claude CLI invocation.
-type InvokeOpts struct {
-	// Prompt is piped to Claude's stdin.
-	Prompt string
-
-	// Dir is the working directory for the Claude process.
-	Dir string
-
-	// Print runs Claude in non-interactive --print mode and captures output.
-	Print bool
-
-	// Interactive connects stdin/stdout for a live session.
-	Interactive bool
-
-	// MaxTurns limits the number of agentic turns (--max-turns flag).
-	MaxTurns int
-
-	// Verbose enables debug logging (passes --verbose to Claude CLI).
-	Verbose bool
-
-	// Continue resumes the most recent conversation (passes --continue to Claude CLI).
-	Continue bool
-
-	// DisallowedTools is a list of tool names that Claude cannot use (--disallowedTools flag).
-	// Use this to prevent write operations during read-only phases like refinement.
-	DisallowedTools []string
-
-	// EventHandler receives structured events during stream processing.
-	// If nil, events are silently discarded.
-	EventHandler events.EventHandler
+func init() {
+	agent.Register("claude", func() agent.AgentInvoker { return &Agent{} })
 }
+
+// Agent implements agent.AgentInvoker for the Claude Code CLI.
+type Agent struct{}
+
+func (a *Agent) Invoke(ctx context.Context, opts agent.InvokeOpts) (string, error) {
+	return invoke(ctx, opts)
+}
+
+func (a *Agent) ModelName() string {
+	return modelName()
+}
+
+func (a *Agent) ConfigDir() string {
+	return ".claude"
+}
+
+// InvokeOpts is an alias for agent.InvokeOpts for backward compatibility.
+type InvokeOpts = agent.InvokeOpts
 
 // Invoke runs the Claude CLI with the given options.
 // In Print mode it streams progress and returns Claude's output.
 // In Interactive mode it blocks until the session ends and returns empty string.
-func Invoke(ctx context.Context, opts InvokeOpts) (string, error) {
+func Invoke(ctx context.Context, opts agent.InvokeOpts) (string, error) {
+	return invoke(ctx, opts)
+}
+
+func invoke(ctx context.Context, opts agent.InvokeOpts) (string, error) {
 	r := &shell.Runner{Dir: opts.Dir}
 
 	if opts.Interactive {
@@ -90,7 +83,7 @@ type streamEvent struct {
 }
 
 // runWithStreamJSON runs Claude with --output-format stream-json and displays progress.
-func runWithStreamJSON(ctx context.Context, opts InvokeOpts) (string, error) {
+func runWithStreamJSON(ctx context.Context, opts agent.InvokeOpts) (string, error) {
 	args := []string{
 		"--dangerously-skip-permissions",
 		"--print",
@@ -196,7 +189,7 @@ func runWithStreamJSON(ctx context.Context, opts InvokeOpts) (string, error) {
 	// stdout lines. We check all of them.
 	allOutput := result + "\n" + assistantText.String() + "\n" + stderrBuf.String() + "\n" + strings.Join(nonJSONLines, "\n")
 	if ulErr := parseUsageLimit(allOutput); ulErr != nil {
-		return result, ulErr
+		return result, ulErr // *agent.UsageLimitError
 	}
 
 	if waitErr != nil {
@@ -273,21 +266,6 @@ func relativePath(path, workDir string) string {
 	return rel
 }
 
-// ContainsComplete checks whether Claude's output contains the completion signal.
-func ContainsComplete(output string) bool {
-	return strings.Contains(output, completeSignal)
-}
-
-// UsageLimitError indicates Claude CLI exited because the subscription usage cap was reached.
-type UsageLimitError struct {
-	ResetAt time.Time
-	Message string
-}
-
-func (e *UsageLimitError) Error() string {
-	return fmt.Sprintf("usage limit reached (resets %s): %s", e.ResetAt.Format(time.RFC3339), e.Message)
-}
-
 // IsUsageLimitError returns true if the output text contains a Claude usage limit message.
 func IsUsageLimitError(output string) bool {
 	lower := strings.ToLower(output)
@@ -309,7 +287,7 @@ var resetAtPattern = regexp.MustCompile(`reset at\s+(\d{1,2}(?::\d{2})?(?:am|pm)
 
 // parseUsageLimit checks output for a usage limit message and parses the reset time.
 // Returns nil if the output does not contain a usage limit message.
-func parseUsageLimit(output string) *UsageLimitError {
+func parseUsageLimit(output string) *agent.UsageLimitError {
 	if !IsUsageLimitError(output) {
 		return nil
 	}
@@ -317,7 +295,7 @@ func parseUsageLimit(output string) *UsageLimitError {
 	resetAt := parseResetTime(output)
 
 	line := extractLimitLine(output)
-	return &UsageLimitError{
+	return &agent.UsageLimitError{
 		ResetAt: resetAt,
 		Message: line,
 	}
@@ -440,10 +418,10 @@ func displayName(rawID string) string {
 	return rawID
 }
 
-// ModelName resolves the current Claude CLI model name by running
+// modelName resolves the current Claude CLI model name by running
 // "claude config get model". It returns a human-friendly display name
 // (e.g. "Sonnet 4.5") or an empty string if the command fails.
-func ModelName() string {
+func modelName() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -455,7 +433,7 @@ func ModelName() string {
 	return displayName(strings.TrimSpace(string(out)))
 }
 
-func buildArgs(opts InvokeOpts) []string {
+func buildArgs(opts agent.InvokeOpts) []string {
 	var args []string
 
 	args = append(args, "--dangerously-skip-permissions")

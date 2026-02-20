@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/gitops"
 	"github.com/uesteibar/ralph/internal/prd"
 	"github.com/uesteibar/ralph/internal/prompts"
@@ -118,7 +118,8 @@ func workspacesNew(args []string, in io.Reader) error {
 		CreatedAt: time.Now(),
 	}
 
-	if err := workspace.CreateWorkspace(ctx, repoRunner, cfg.Repo.Path, ws, cfg.Repo.DefaultBase, cfg.CopyToWorktree); err != nil {
+	agentConfigDir := agent.ConfigDirFor(cfg.Agent)
+	if err := workspace.CreateWorkspace(ctx, repoRunner, cfg.Repo.Path, ws, cfg.Repo.DefaultBase, cfg.CopyToWorktree, agentConfigDir); err != nil {
 		return fmt.Errorf("creating workspace: %w", err)
 	}
 
@@ -412,7 +413,11 @@ func prdNew(args []string) error {
 		return fmt.Errorf("rendering PRD prompt: %w", err)
 	}
 
-	_, err = claude.Invoke(context.Background(), claude.InvokeOpts{
+	inv, err := agent.NewInvoker(cfg.Agent)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+	_, err = inv.Invoke(context.Background(), agent.InvokeOpts{
 		Prompt:      prompt,
 		Dir:         wc.WorkDir,
 		Interactive: true,

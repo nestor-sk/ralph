@@ -15,6 +15,7 @@ type Config struct {
 	Paths          PathsConfig `yaml:"paths"`
 	QualityChecks  []string    `yaml:"quality_checks"`
 	CopyToWorktree []string    `yaml:"copy_to_worktree,omitempty"`
+	Agent          string      `yaml:"agent,omitempty"` // coding agent: "claude" (default), "cursor"
 }
 
 type RepoConfig struct {
@@ -72,6 +73,13 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Repo.BranchPrefix == "" {
 		cfg.Repo.BranchPrefix = "ralph/"
+	}
+
+	// Agent: env override > config > default
+	if a := os.Getenv("RALPH_AGENT"); a != "" {
+		cfg.Agent = a
+	} else if cfg.Agent == "" {
+		cfg.Agent = "claude"
 	}
 
 	if err := cfg.validate(); err != nil {

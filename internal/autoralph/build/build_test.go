@@ -79,7 +79,7 @@ type wsCreateCall struct {
 	copyPatterns []string
 }
 
-func (m *mockWorkspaceCreator) Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string) error {
+func (m *mockWorkspaceCreator) Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string, agentConfigDir string) error {
 	m.calls = append(m.calls, wsCreateCall{repoPath: repoPath, ws: ws, base: base, copyPatterns: copyPatterns})
 	return m.err
 }

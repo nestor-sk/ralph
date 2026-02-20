@@ -4,27 +4,11 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/uesteibar/ralph/internal/agent"
 )
 
-func TestContainsComplete_WithSignal(t *testing.T) {
-	output := "Some output\n<promise>COMPLETE</promise>\nMore output"
-	if !ContainsComplete(output) {
-		t.Error("expected ContainsComplete to return true")
-	}
-}
-
-func TestContainsComplete_WithoutSignal(t *testing.T) {
-	output := "Some output without the signal"
-	if ContainsComplete(output) {
-		t.Error("expected ContainsComplete to return false")
-	}
-}
-
-func TestContainsComplete_Empty(t *testing.T) {
-	if ContainsComplete("") {
-		t.Error("expected ContainsComplete to return false for empty string")
-	}
-}
+// ContainsComplete tests moved to internal/agent/agent_test.go
 
 func TestBuildArgs_PrintMode(t *testing.T) {
 	args := buildArgs(InvokeOpts{Print: true, Prompt: "test"})
@@ -239,7 +223,7 @@ func TestParseUsageLimit_MultilineOutput(t *testing.T) {
 }
 
 func TestUsageLimitError_ErrorString(t *testing.T) {
-	err := &UsageLimitError{
+	err := &agent.UsageLimitError{
 		ResetAt: time.Date(2026, time.January, 1, 9, 0, 0, 0, time.UTC),
 		Message: "You've hit your limit",
 	}
@@ -536,5 +520,18 @@ func TestStreamEvent_UnmarshalUsage_AssistantEventNoUsage(t *testing.T) {
 	}
 	if ev.Usage.OutputTokens != 0 {
 		t.Errorf("Usage.OutputTokens = %d, want 0", ev.Usage.OutputTokens)
+	}
+}
+
+func TestNewInvoker_Claude(t *testing.T) {
+	inv, err := agent.NewInvoker("claude")
+	if err != nil {
+		t.Fatalf("NewInvoker(claude): %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected non-nil invoker")
+	}
+	if inv.ConfigDir() != ".claude" {
+		t.Errorf("ConfigDir() = %q, want .claude", inv.ConfigDir())
 	}
 }

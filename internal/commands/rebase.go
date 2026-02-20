@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/gitops"
 	"github.com/uesteibar/ralph/internal/prd"
 	"github.com/uesteibar/ralph/internal/prompts"
@@ -67,11 +67,15 @@ func Rebase(args []string) error {
 	}
 
 	promptsDir := cfg.PromptsDir()
-
 	qualityChecks := cfg.QualityChecks
 
+	inv, err := agent.NewInvoker(cfg.Agent)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+
 	for result.HasConflicts {
-		if err := resolveConflicts(ctx, r, wc, targetBranch, promptsDir, qualityChecks); err != nil {
+		if err := resolveConflicts(ctx, r, wc, targetBranch, promptsDir, qualityChecks, inv); err != nil {
 			return err
 		}
 
@@ -94,7 +98,7 @@ func Rebase(args []string) error {
 	return nil
 }
 
-func resolveConflicts(ctx context.Context, r *shell.Runner, wc workspace.WorkContext, targetBranch, promptsDir string, qualityChecks []string) error {
+func resolveConflicts(ctx context.Context, r *shell.Runner, wc workspace.WorkContext, targetBranch, promptsDir string, qualityChecks []string, inv agent.AgentInvoker) error {
 	conflictFiles, err := gitops.ConflictFiles(ctx, r)
 	if err != nil {
 		return fmt.Errorf("listing conflict files: %w", err)
@@ -107,14 +111,15 @@ func resolveConflicts(ctx context.Context, r *shell.Runner, wc workspace.WorkCon
 		return fmt.Errorf("building conflict prompt: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "invoking Claude to resolve conflicts...")
-	_, err = claude.Invoke(ctx, claude.InvokeOpts{
+	fmt.Fprintln(os.Stderr, "invoking agent to resolve conflicts...")
+	_, err = inv.Invoke(ctx, agent.InvokeOpts{
 		Prompt:   prompt,
+		Dir:      wc.WorkDir,
 		Print:    true,
 		MaxTurns: 30,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Claude session ended with error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent session ended with error: %v\n", err)
 	}
 
 	return nil

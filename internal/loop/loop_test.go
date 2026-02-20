@@ -8,10 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/events"
 	"github.com/uesteibar/ralph/internal/prd"
 )
+
+// mockInvoker is a no-op AgentInvoker for tests.
+type mockInvoker struct{}
+
+func (m *mockInvoker) Invoke(context.Context, agent.InvokeOpts) (string, error) { return "", nil }
+func (m *mockInvoker) ModelName() string                                         { return "" }
+func (m *mockInvoker) ConfigDir() string                                         { return ".claude" }
 
 // recordingHandler captures events for test assertions.
 type recordingHandler struct {
@@ -58,10 +65,10 @@ func TestRun_InvokesQAVerificationWhenAllStoriesPass(t *testing.T) {
 
 	// Track invocations
 	var qaInvocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			qaInvocations++
 			// Simulate QA agent marking test as passed
@@ -72,6 +79,7 @@ func TestRun_InvokesQAVerificationWhenAllStoriesPass(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -111,10 +119,10 @@ func TestRun_SkipsQAVerificationWhenNoIntegrationTests(t *testing.T) {
 	}
 
 	var qaInvocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			qaInvocations++
 		}
@@ -122,6 +130,7 @@ func TestRun_SkipsQAVerificationWhenNoIntegrationTests(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -162,10 +171,10 @@ func TestRun_QAVerificationReceivesCorrectContext(t *testing.T) {
 	}
 
 	var capturedOpts invokeOpts
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			capturedOpts = opts
 			// Mark test as passed to exit loop
@@ -177,6 +186,7 @@ func TestRun_QAVerificationReceivesCorrectContext(t *testing.T) {
 
 	qualityChecks := []string{"go test ./...", "go vet ./..."}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -221,10 +231,10 @@ func TestRun_ReturnsSuccessAfterQAVerificationCompletes(t *testing.T) {
 		t.Fatalf("writing test PRD: %v", err)
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			// Simulate QA agent marking test as passed
 			testPRD.IntegrationTests[0].Passes = true
@@ -234,6 +244,7 @@ func TestRun_ReturnsSuccessAfterQAVerificationCompletes(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -276,16 +287,17 @@ func TestRun_ContinuesLoopIfQAVerificationDoesNotPassAllTests(t *testing.T) {
 	}
 
 	var iterations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		iterations++
 		// Don't mark test as passed - should hit max iterations
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 3,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -353,10 +365,10 @@ func TestRun_InvokesQAFixWhenIntegrationTestsFail(t *testing.T) {
 	}
 
 	var qaVerificationCount, qaFixCount int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			qaVerificationCount++
 			// QA verification does not fix the test
@@ -372,6 +384,7 @@ func TestRun_InvokesQAFixWhenIntegrationTestsFail(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -416,10 +429,10 @@ func TestRun_QAFixReceivesFailedTests(t *testing.T) {
 	}
 
 	var capturedFixPrompt string
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAFix {
 			capturedFixPrompt = opts.prompt
 			// Fix agent marks test as passed
@@ -430,6 +443,7 @@ func TestRun_QAFixReceivesFailedTests(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -478,10 +492,10 @@ func TestRun_FixCycleContinuesUntilAllTestsPass(t *testing.T) {
 	}
 
 	var fixInvocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAFix {
 			fixInvocations++
 			// Fix one test per invocation
@@ -496,6 +510,7 @@ func TestRun_FixCycleContinuesUntilAllTestsPass(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 10,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -543,16 +558,17 @@ func TestRun_FixCycleRespectsMaxIterations(t *testing.T) {
 	}
 
 	var totalInvocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		totalInvocations++
 		// Never fix the test - should hit max iterations
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 3,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -594,10 +610,10 @@ func TestRun_CompleteSignalRejectedWhenIntegrationTestsFail(t *testing.T) {
 	}
 
 	var storyInvocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if !opts.isQAVerification && !opts.isQAFix {
 			storyInvocations++
 			// Story agent marks story as passed and sends COMPLETE signal
@@ -615,6 +631,7 @@ func TestRun_CompleteSignalRejectedWhenIntegrationTestsFail(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -657,15 +674,16 @@ func TestRun_CompleteSignalAcceptedWhenBothStoriesAndIntegrationTestsPass(t *tes
 	}
 
 	var invocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		invocations++
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -718,10 +736,10 @@ func TestRun_VerboseFlagPassedToInvoke(t *testing.T) {
 	}
 
 	var capturedVerbose bool
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		capturedVerbose = opts.verbose
 		// Mark story as passed to exit loop
 		testPRD.UserStories[0].Passes = true
@@ -730,6 +748,7 @@ func TestRun_VerboseFlagPassedToInvoke(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -771,10 +790,10 @@ func TestRun_VerboseFlagPassedToQAVerification(t *testing.T) {
 	}
 
 	var qaVerbose bool
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			qaVerbose = opts.verbose
 			// Mark test as passed to exit loop
@@ -785,6 +804,7 @@ func TestRun_VerboseFlagPassedToQAVerification(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -835,15 +855,16 @@ func TestRun_DoesNotExitWithUncommittedChanges(t *testing.T) {
 	}
 
 	var invocations int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		invocations++
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -892,14 +913,15 @@ func TestRun_ContinuesLoopWhenGitCheckFails(t *testing.T) {
 		return false, nil // Clean on subsequent checks
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -944,15 +966,16 @@ func TestRun_ExitsImmediatelyWhenGitClean(t *testing.T) {
 		return false, nil // Always clean
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		t.Error("should not invoke Claude when all stories pass and git is clean")
 		return "", nil
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1004,10 +1027,10 @@ func TestRun_GitCheckOnQAVerificationExit(t *testing.T) {
 		return false, nil // Clean on retry
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			// QA verification marks test as passed
 			testPRD.IntegrationTests[0].Passes = true
@@ -1017,6 +1040,7 @@ func TestRun_GitCheckOnQAVerificationExit(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1058,10 +1082,10 @@ func TestRun_VerboseFlagPassedToQAFix(t *testing.T) {
 	}
 
 	var fixVerbose bool
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAFix {
 			fixVerbose = opts.verbose
 			// Mark test as passed to exit loop
@@ -1072,6 +1096,7 @@ func TestRun_VerboseFlagPassedToQAFix(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1100,13 +1125,13 @@ func TestInvokeWithUsageLimitWait_RetriesOnUsageLimit(t *testing.T) {
 	defer mockFastUsageLimitWait()()
 
 	var calls int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		calls++
 		if calls == 1 {
-			return "", &claude.UsageLimitError{
+			return "", &agent.UsageLimitError{
 				ResetAt: time.Now().Add(-1 * time.Second), // past → triggers fallback wait
 				Message: "You've hit your limit",
 			}
@@ -1114,7 +1139,7 @@ func TestInvokeWithUsageLimitWait_RetriesOnUsageLimit(t *testing.T) {
 		return "success", nil
 	}
 
-	output, err := invokeWithUsageLimitWait(context.Background(), invokeOpts{
+	output, err := invokeWithUsageLimitWait(context.Background(), &mockInvoker{}, invokeOpts{
 		prompt: "test",
 	})
 
@@ -1130,15 +1155,15 @@ func TestInvokeWithUsageLimitWait_RetriesOnUsageLimit(t *testing.T) {
 }
 
 func TestInvokeWithUsageLimitWait_PassesThroughNonUsageLimitErrors(t *testing.T) {
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
 	expectedErr := fmt.Errorf("some other error")
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		return "partial", expectedErr
 	}
 
-	output, err := invokeWithUsageLimitWait(context.Background(), invokeOpts{
+	output, err := invokeWithUsageLimitWait(context.Background(), &mockInvoker{}, invokeOpts{
 		prompt: "test",
 	})
 
@@ -1151,14 +1176,14 @@ func TestInvokeWithUsageLimitWait_PassesThroughNonUsageLimitErrors(t *testing.T)
 }
 
 func TestInvokeWithUsageLimitWait_PassesThroughSuccess(t *testing.T) {
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		return "done", nil
 	}
 
-	output, err := invokeWithUsageLimitWait(context.Background(), invokeOpts{
+	output, err := invokeWithUsageLimitWait(context.Background(), &mockInvoker{}, invokeOpts{
 		prompt: "test",
 	})
 
@@ -1173,11 +1198,11 @@ func TestInvokeWithUsageLimitWait_PassesThroughSuccess(t *testing.T) {
 func TestInvokeWithUsageLimitWait_RespectsContext(t *testing.T) {
 	defer mockFastUsageLimitWait()()
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
-		return "", &claude.UsageLimitError{
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
+		return "", &agent.UsageLimitError{
 			ResetAt: time.Now().Add(1 * time.Hour), // far future
 			Message: "You've hit your limit",
 		}
@@ -1190,7 +1215,7 @@ func TestInvokeWithUsageLimitWait_RespectsContext(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := invokeWithUsageLimitWait(ctx, invokeOpts{
+	_, err := invokeWithUsageLimitWait(ctx, &mockInvoker{}, invokeOpts{
 		prompt: "test",
 	})
 
@@ -1221,14 +1246,14 @@ func TestRun_UsageLimitDoesNotCountAsIteration(t *testing.T) {
 	}
 
 	var calls int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		calls++
 		// First 3 calls return usage limit, 4th succeeds
 		if calls <= 3 {
-			return "", &claude.UsageLimitError{
+			return "", &agent.UsageLimitError{
 				ResetAt: time.Now().Add(-1 * time.Second),
 				Message: "You've hit your limit",
 			}
@@ -1243,6 +1268,7 @@ func TestRun_UsageLimitDoesNotCountAsIteration(t *testing.T) {
 	// iteration 2 sees the story now passes and exits. If usage limit retries
 	// counted as iterations, we'd exhaust MaxIterations before succeeding.
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 2,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1254,7 +1280,7 @@ func TestRun_UsageLimitDoesNotCountAsIteration(t *testing.T) {
 		t.Errorf("Run returned error: %v (usage limit retries should not count as iterations)", err)
 	}
 	if calls != 4 {
-		t.Errorf("expected 4 invokeClaudeFn calls (3 rate limited + 1 success), got %d", calls)
+		t.Errorf("expected 4 invokeAgentFn calls (3 rate limited + 1 success), got %d", calls)
 	}
 }
 
@@ -1262,14 +1288,14 @@ func TestInvokeWithUsageLimitWait_EmitsUsageLimitEvent(t *testing.T) {
 	defer mockFastUsageLimitWait()()
 
 	var calls int
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
 	resetAt := time.Now().Add(-1 * time.Second)
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		calls++
 		if calls == 1 {
-			return "", &claude.UsageLimitError{
+			return "", &agent.UsageLimitError{
 				ResetAt: resetAt,
 				Message: "You've hit your limit",
 			}
@@ -1278,7 +1304,7 @@ func TestInvokeWithUsageLimitWait_EmitsUsageLimitEvent(t *testing.T) {
 	}
 
 	handler := &recordingHandler{}
-	output, err := invokeWithUsageLimitWait(context.Background(), invokeOpts{
+	output, err := invokeWithUsageLimitWait(context.Background(), &mockInvoker{}, invokeOpts{
 		prompt:       "test",
 		eventHandler: handler,
 	})
@@ -1323,10 +1349,10 @@ func TestRun_EmitsIterationStartAndStoryStartedEvents(t *testing.T) {
 		t.Fatalf("writing test PRD: %v", err)
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		testPRD.UserStories[0].Passes = true
 		prd.Write(prdPath, testPRD)
 		return "", nil
@@ -1334,6 +1360,7 @@ func TestRun_EmitsIterationStartAndStoryStartedEvents(t *testing.T) {
 
 	handler := &recordingHandler{}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1403,10 +1430,10 @@ func TestRun_EmitsQAPhaseStartedEvent(t *testing.T) {
 		t.Fatalf("writing test PRD: %v", err)
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			testPRD.IntegrationTests[0].Passes = true
 			prd.Write(prdPath, testPRD)
@@ -1416,6 +1443,7 @@ func TestRun_EmitsQAPhaseStartedEvent(t *testing.T) {
 
 	handler := &recordingHandler{}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1464,16 +1492,17 @@ func TestRun_EmitsLogMessageOnCompletion(t *testing.T) {
 		t.Fatalf("writing test PRD: %v", err)
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		t.Error("should not invoke Claude when all stories pass")
 		return "", nil
 	}
 
 	handler := &recordingHandler{}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1522,10 +1551,10 @@ func TestRun_EmitsWarningLogOnClaudeError(t *testing.T) {
 	}
 
 	callCount := 0
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		callCount++
 		if callCount == 1 {
 			// First call: return an error (non-fatal)
@@ -1539,6 +1568,7 @@ func TestRun_EmitsWarningLogOnClaudeError(t *testing.T) {
 
 	handler := &recordingHandler{}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1587,10 +1617,10 @@ func TestRun_KnowledgePathPassedToStoryPrompt(t *testing.T) {
 	}
 
 	var capturedPrompt string
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		capturedPrompt = opts.prompt
 		testPRD.UserStories[0].Passes = true
 		prd.Write(prdPath, testPRD)
@@ -1598,6 +1628,7 @@ func TestRun_KnowledgePathPassedToStoryPrompt(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1639,10 +1670,10 @@ func TestRun_KnowledgePathPassedToQAVerification(t *testing.T) {
 	}
 
 	var capturedQAPrompt string
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAVerification {
 			capturedQAPrompt = opts.prompt
 			testPRD.IntegrationTests[0].Passes = true
@@ -1652,6 +1683,7 @@ func TestRun_KnowledgePathPassedToQAVerification(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1693,10 +1725,10 @@ func TestRun_KnowledgePathPassedToQAFix(t *testing.T) {
 	}
 
 	var capturedFixPrompt string
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		if opts.isQAFix {
 			capturedFixPrompt = opts.prompt
 			testPRD.IntegrationTests[0].Passes = true
@@ -1706,6 +1738,7 @@ func TestRun_KnowledgePathPassedToQAFix(t *testing.T) {
 	}
 
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,
@@ -1753,15 +1786,16 @@ func TestRun_EmitsWarningLogOnGitCheckFailure(t *testing.T) {
 		return false, nil
 	}
 
-	origInvokeFn := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvokeFn }()
+	origInvokeFn := invokeAgentFn
+	defer func() { invokeAgentFn = origInvokeFn }()
 
-	invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
+	invokeAgentFn = func(ctx context.Context, _ agent.AgentInvoker, opts invokeOpts) (string, error) {
 		return "", nil
 	}
 
 	handler := &recordingHandler{}
 	err := Run(context.Background(), Config{
+		Invoker:       &mockInvoker{},
 		MaxIterations: 5,
 		WorkDir:       dir,
 		PRDPath:       prdPath,

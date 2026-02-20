@@ -25,8 +25,8 @@ import (
 // Compile-time check: gitOpsAdapter satisfies checks.GitOps.
 var _ checks.GitOps = (*gitOpsAdapter)(nil)
 
-// Compile-time check: claudeInvoker satisfies invoker.EventInvoker.
-var _ invoker.EventInvoker = (*claudeInvoker)(nil)
+// Compile-time check: agentInvoker satisfies invoker.EventInvoker.
+var _ invoker.EventInvoker = (*agentInvoker)(nil)
 
 // Compile-time checks: branchPullerAdapter satisfies all three BranchPuller interfaces.
 var (
@@ -148,7 +148,7 @@ func TestWorkspaceCreatorAdapter_Create_PullsBeforeCreateWorkspace(t *testing.T)
 
 	// Create will fail on the actual git operations (no real repo), but we
 	// can verify pull was called first by checking order before the error.
-	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil)
+	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil, ".claude")
 
 	if len(callOrder) == 0 {
 		t.Fatal("expected pullFn to be called")
@@ -170,7 +170,7 @@ func TestWorkspaceCreatorAdapter_Create_ProceedsWhenPullFails(t *testing.T) {
 	// Even though pull fails, Create should still attempt workspace creation.
 	// It will fail on actual git ops, but that's fine — we're testing that
 	// pullFn failure doesn't prevent the call from proceeding.
-	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil)
+	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil, ".claude")
 
 	if !pullCalled {
 		t.Fatal("expected pullFn to be called")
@@ -183,7 +183,7 @@ func TestWorkspaceCreatorAdapter_Create_SkipsPullWhenNilFn(t *testing.T) {
 	}
 
 	// Should not panic — nil pullFn is simply skipped.
-	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil)
+	_ = adapter.Create(context.Background(), t.TempDir(), workspace.Workspace{Name: "test-ws"}, "main", nil, ".claude")
 }
 
 func TestRebaseRunnerAdapter_RunRebase_BuildsCorrectCommand(t *testing.T) {

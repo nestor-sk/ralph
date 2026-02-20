@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"syscall"
 
+	_ "github.com/uesteibar/ralph/internal/claude" // register claude agent
+	_ "github.com/uesteibar/ralph/internal/cursor" // register cursor agent
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/events"
 	"github.com/uesteibar/ralph/internal/knowledge"
 	"github.com/uesteibar/ralph/internal/loop"
@@ -87,8 +90,14 @@ func Daemon(args []string) error {
 
 	promptsDir := cfg.PromptsDir()
 
+	inv, err := agent.NewInvoker(cfg.Agent)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+
 	// Run the loop.
 	loopErr := daemonRunLoopFn(ctx, loop.Config{
+		Invoker:       inv,
 		MaxIterations: *maxIter,
 		WorkDir:       wc.WorkDir,
 		PRDPath:       wc.PRDPath,

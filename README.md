@@ -185,7 +185,9 @@ ralph overview               # See progress across all workspaces
 ## Prerequisites
 
 - **Go 1.25+** (build from source)
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (`claude` CLI) installed and authenticated
+- **Coding agent CLI** — one of:
+  - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (`claude` CLI) — default
+  - **[Cursor CLI](https://cursor.com/docs/cli/overview)** (`agent` CLI)
 - **git** (for worktree operations)
 - **bash** or **zsh** (for shell integration)
 
@@ -375,8 +377,10 @@ ralph init
 | `.ralph/workspaces/` | Workspace directories (gitignored) |
 | `.ralph/state/workspaces.json` | Workspace registry (gitignored) |
 | `.ralph/state/archive/` | Completed PRDs (gitignored) |
-| `.claude/commands/finish.md` | The `/finish` skill for PRD generation |
-| `.claude/CLAUDE.md` | Project rules for the agent |
+| `.claude/commands/finish.md` | The `/finish` command for PRD generation (Claude) |
+| `.claude/CLAUDE.md` | Project rules (Claude) |
+| `.cursor/skills/ralph-commit-rules/SKILL.md` | Commit rules skill (Cursor) |
+| `.cursor/skills/finish/SKILL.md` | PRD finish skill — invoke via `/finish` (Cursor) |
 
 ---
 

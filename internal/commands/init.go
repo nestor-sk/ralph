@@ -11,14 +11,19 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	_ "github.com/uesteibar/ralph/internal/claude" // register claude agent
+	_ "github.com/uesteibar/ralph/internal/cursor" // register cursor agent
+	"github.com/uesteibar/ralph/internal/agent"
+	"github.com/uesteibar/ralph/internal/agent/scaffolds"
 	"github.com/uesteibar/ralph/internal/config"
 	"github.com/uesteibar/ralph/internal/knowledge"
 )
 
-// invokeClaudeFn is the function used to invoke Claude CLI. It can be
+// invokeAgentFn is the function used to invoke the agent CLI. It can be
 // overridden in tests to avoid calling the real CLI.
-var invokeClaudeFn = claude.Invoke
+var invokeAgentFn = func(ctx context.Context, inv agent.AgentInvoker, opts agent.InvokeOpts) (string, error) {
+	return inv.Invoke(ctx, opts)
+}
 
 const qualityCheckPrompt = `Analyze this codebase and detect the quality check commands that should be run (tests, linting, type checking, formatting, etc.).
 
@@ -37,92 +42,10 @@ paths:
   tasks_dir: ".ralph/tasks"
   skills_dir: ".ralph/skills"
 
+# agent: claude   # or "cursor" — default is claude
 quality_checks:
   - "npm test"
   # - "npm run lint"
-`
-
-const finishSkillContent = `Take the plan we have discussed and agreed upon in this conversation and structure it into a PRD JSON file.
-
-## Output Format
-
-Write to the PRD path specified in the system prompt. If none specified write to ` + "`.ralph/state/prd.json`" + `.
-
-Use this exact schema:
-
-` + "```json" + `
-{
-  "project": "<project name from .ralph/ralph.yaml>",
-  "branchName": "ralph/<feature-name-kebab-case>",
-  "description": "<one-line description of the feature>",
-  "featureOverview": "<approved feature overview from the conversation>",
-  "architectureOverview": "<approved architecture overview from the conversation>",
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "<short story title>",
-      "description": "As a <user>, I want <feature> so that <benefit>",
-      "acceptanceCriteria": [
-        "Specific verifiable criterion",
-        "All quality checks pass"
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    }
-  ],
-  "integrationTests": [
-    {
-      "id": "IT-001",
-      "description": "<what this test verifies at a feature level>",
-      "steps": [
-        "Step 1: <action to perform>",
-        "Step 2: <expected result to verify>"
-      ],
-      "passes": false,
-      "failure": "",
-      "notes": ""
-    }
-  ]
-}
-` + "```" + `
-
-## Overview Fields
-
-- Capture the approved feature overview and architecture overview from the conversation
-- ` + "`featureOverview`" + `: a concise summary of the agreed-upon feature design, including the chosen approach and alternatives considered
-- ` + "`architectureOverview`" + `: a concise summary of the agreed-upon architecture, including the chosen approach and alternatives considered
-- If no overviews were discussed, leave these fields as empty strings
-
-## Story Rules
-
-- Each story must be completable in ONE context window (one Ralph iteration)
-- Order by dependency: schema/data first, then backend logic, then UI
-- Acceptance criteria must be specific and verifiable
-- Include "All quality checks pass" in every story's acceptance criteria
-- All stories start with ` + "`passes: false`" + `
-- Priority determines execution order (1 = first)
-
-## Integration Test Rules
-
-- Include integration tests agreed upon during PRD discussion
-- Each test has: id (IT-xxx), description, steps (array), passes, failure, notes
-- All integration tests start with ` + "`passes: false`" + `
-- ` + "`failure`" + ` field records why a test failed (empty string if not yet run)
-- ` + "`notes`" + ` field captures observations or additional context
-
-## After Writing
-
-1. Read back the file to confirm it is valid JSON
-2. Tell the user the PRD is ready and suggest: ` + "`ralph run`" + `
-`
-
-const claudeMDContent = `# Ralph — Project Rules
-
-## Commit Rules
-
-- Do NOT add Co-Authored-By headers to any commit messages.
-- Commits must use only the local git user configuration.
 `
 
 // Init scaffolds the .ralph/ directory in the current project.
@@ -145,7 +68,18 @@ func Init(args []string, in io.Reader) error {
 	ralphDir := filepath.Join(cwd, ".ralph")
 	stateDir := filepath.Join(ralphDir, "state")
 	configPath := filepath.Join(ralphDir, "ralph.yaml")
-	finishSkillPath := filepath.Join(cwd, ".claude", "commands", "finish.md")
+
+	// Resolve agent for scaffolding (env, existing config, or default)
+	inv, invErr := resolveAgentForDir(cwd)
+	agentName := "claude"
+	if invErr == nil {
+		agentName = inv.ConfigDir()
+		if agentName == ".claude" {
+			agentName = "claude"
+		} else if agentName == ".cursor" {
+			agentName = "cursor"
+		}
+	}
 
 	var created, skipped []string
 
@@ -164,7 +98,12 @@ func Init(args []string, in io.Reader) error {
 		filepath.Join(ralphDir, "workspaces"),
 		stateDir,
 		filepath.Join(stateDir, "archive"),
-		filepath.Join(cwd, ".claude", "commands"),
+	}
+	if agentName == "claude" {
+		dirs = append(dirs, filepath.Join(cwd, ".claude", "commands"))
+	} else if agentName == "cursor" {
+		dirs = append(dirs, filepath.Join(cwd, ".cursor", "skills", "ralph-commit-rules"))
+		dirs = append(dirs, filepath.Join(cwd, ".cursor", "skills", "finish"))
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -189,7 +128,7 @@ func Init(args []string, in io.Reader) error {
 		if useLLM {
 			detected, llmErr := detectQualityChecks(cwd)
 			if llmErr != nil {
-				fmt.Printf("Warning: Claude analysis failed (%v), using default template.\n", llmErr)
+				fmt.Printf("Warning: agent analysis failed (%v), using default template.\n", llmErr)
 			} else {
 				qualityChecks = detected
 			}
@@ -228,18 +167,32 @@ func Init(args []string, in io.Reader) error {
 		return fmt.Errorf("seeding knowledge base: %w", err)
 	}
 
-	// Install /finish Claude skill (always write to keep up to date)
-	if err := os.WriteFile(finishSkillPath, []byte(finishSkillContent), 0644); err != nil {
-		return fmt.Errorf("writing finish skill: %w", err)
-	}
-	created = append(created, ".claude/commands/finish.md")
+	// Install agent-specific scaffolding (from shared scaffolds)
+	if agentName == "claude" {
+		finishSkillPath := filepath.Join(cwd, ".claude", "commands", "finish.md")
+		if err := os.WriteFile(finishSkillPath, []byte(scaffolds.ClaudeFinishCommand()), 0644); err != nil {
+			return fmt.Errorf("writing finish skill: %w", err)
+		}
+		created = append(created, ".claude/commands/finish.md")
 
-	// Write .claude/CLAUDE.md (always write to keep up to date)
-	claudeMDPath := filepath.Join(cwd, ".claude", "CLAUDE.md")
-	if err := os.WriteFile(claudeMDPath, []byte(claudeMDContent), 0644); err != nil {
-		return fmt.Errorf("writing CLAUDE.md: %w", err)
+		claudeMDPath := filepath.Join(cwd, ".claude", "CLAUDE.md")
+		if err := os.WriteFile(claudeMDPath, []byte(scaffolds.ClaudeCLAUDEMD()), 0644); err != nil {
+			return fmt.Errorf("writing CLAUDE.md: %w", err)
+		}
+		created = append(created, ".claude/CLAUDE.md")
+	} else if agentName == "cursor" {
+		commitRulesPath := filepath.Join(cwd, ".cursor", "skills", "ralph-commit-rules", "SKILL.md")
+		if err := os.WriteFile(commitRulesPath, []byte(scaffolds.CursorCommitRulesSkill()), 0644); err != nil {
+			return fmt.Errorf("writing Cursor ralph-commit-rules skill: %w", err)
+		}
+		created = append(created, ".cursor/skills/ralph-commit-rules/SKILL.md")
+
+		finishSkillPath := filepath.Join(cwd, ".cursor", "skills", "finish", "SKILL.md")
+		if err := os.WriteFile(finishSkillPath, []byte(scaffolds.CursorFinishSkill()), 0644); err != nil {
+			return fmt.Errorf("writing Cursor finish skill: %w", err)
+		}
+		created = append(created, ".cursor/skills/finish/SKILL.md")
 	}
-	created = append(created, ".claude/CLAUDE.md")
 
 	// Ensure appropriate paths are in .gitignore based on user's choice
 	ensureGitignoreEntries(cwd, gitTrackChoice)
@@ -388,13 +341,18 @@ func trimSpace(s string) string {
 	return s[start:end]
 }
 
-// detectQualityChecks invokes Claude CLI to analyze the codebase and return
+// detectQualityChecks invokes the agent CLI to analyze the codebase and return
 // a list of quality check commands.
 func detectQualityChecks(dir string) ([]string, error) {
 	fmt.Println("Analyzing the codebase...")
 
+	inv, err := resolveAgentForDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx := context.Background()
-	output, err := invokeClaudeFn(ctx, claude.InvokeOpts{
+	output, err := invokeAgentFn(ctx, inv, agent.InvokeOpts{
 		Prompt:   qualityCheckPrompt,
 		Dir:      dir,
 		Print:    true,
@@ -404,6 +362,18 @@ func detectQualityChecks(dir string) ([]string, error) {
 		return nil, err
 	}
 	return parseQualityChecks(output)
+}
+
+// resolveAgentForDir returns the agent invoker for the given directory.
+// Uses RALPH_AGENT env, config.Discover, or "claude" as fallback.
+func resolveAgentForDir(dir string) (agent.AgentInvoker, error) {
+	if a := os.Getenv("RALPH_AGENT"); a != "" {
+		return agent.NewInvoker(a)
+	}
+	if cfg, err := config.Discover(dir); err == nil {
+		return agent.NewInvoker(cfg.Agent)
+	}
+	return agent.NewInvoker("claude")
 }
 
 // parseQualityChecks parses Claude's YAML list output into a string slice.

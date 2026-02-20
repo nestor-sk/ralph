@@ -13,9 +13,10 @@ import (
 // CreateWorkspace creates a workspace with its full directory structure:
 // .ralph/workspaces/<name>/ directory, workspace.json metadata, git worktree
 // at .ralph/workspaces/<name>/tree/, copies .ralph/ (skipping worktrees/,
-// state/, workspaces/), .claude/ if exists, and copy_to_worktree patterns.
-// Finally it updates the registry.
-func CreateWorkspace(ctx context.Context, runner *shell.Runner, repoPath string, ws Workspace, base string, copyPatterns []string) error {
+// state/, workspaces/), agent config dir (e.g. .claude/, .cursor/) if exists,
+// and copy_to_worktree patterns. agentConfigDir is the agent's config dir
+// (e.g. ".claude", ".cursor").
+func CreateWorkspace(ctx context.Context, runner *shell.Runner, repoPath string, ws Workspace, base string, copyPatterns []string, agentConfigDir string) error {
 	wsDir := WorkspacePath(repoPath, ws.Name)
 	treePath := TreePath(repoPath, ws.Name)
 
@@ -71,9 +72,11 @@ func CreateWorkspace(ctx context.Context, runner *shell.Runner, repoPath string,
 		return fmt.Errorf("copying .ralph: %w", err)
 	}
 
-	// Copy .claude/ if it exists.
-	if err := gitops.CopyDotClaude(repoPath, treePath); err != nil {
-		return fmt.Errorf("copying .claude: %w", err)
+	// Copy agent config dir (e.g. .claude/, .cursor/) if it exists.
+	if agentConfigDir != "" {
+		if err := gitops.CopyAgentConfig(repoPath, treePath, agentConfigDir); err != nil {
+			return fmt.Errorf("copying %s: %w", agentConfigDir, err)
+		}
 	}
 
 	// Copy user-specified patterns.

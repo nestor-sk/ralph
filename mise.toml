@@ -1,0 +1,10 @@
+# Ralph — tool versions for development
+# See README.md and docs/ for prerequisites and setup.
+# Run: mise install
+
+[tools]
+go = "1.25.6"       # go.mod; used for ralph and autoralph
+node = "22"         # web (React/Vite), E2E (Playwright), install-autoralph
+just = "1.46.0"     # task runner (just build, just test, etc.)
+mdbook = "0.5.2"    # docs (just docs-build, just docs-serve)
+shellcheck = "0.11.0"  # just shellcheck (install-ralph.sh, install-autoralph.sh)

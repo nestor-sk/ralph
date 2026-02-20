@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/events"
 	"github.com/uesteibar/ralph/internal/prd"
 	"github.com/uesteibar/ralph/internal/prompts"
@@ -21,7 +21,7 @@ const (
 	iterationDelay       = 2 * time.Second
 )
 
-// invokeOpts holds parameters for Claude invocation (used for testability).
+// invokeOpts holds parameters for agent invocation (used for testability).
 type invokeOpts struct {
 	prompt           string
 	dir              string
@@ -31,9 +31,9 @@ type invokeOpts struct {
 	isQAFix          bool
 }
 
-// invokeClaudeFn is the function used to invoke Claude. Package-level var for testability.
-var invokeClaudeFn = func(ctx context.Context, opts invokeOpts) (string, error) {
-	return claude.Invoke(ctx, claude.InvokeOpts{
+// invokeAgentFn is the function used to invoke the agent. Package-level var for testability.
+var invokeAgentFn = func(ctx context.Context, inv agent.AgentInvoker, opts invokeOpts) (string, error) {
+	return inv.Invoke(ctx, agent.InvokeOpts{
 		Prompt:       opts.prompt,
 		Dir:          opts.dir,
 		Print:        true,
@@ -83,14 +83,14 @@ func checkGitClean(ctx context.Context, dir string, h events.EventHandler) bool 
 // cannot be parsed or appears to be in the past (e.g. clock skew).
 var usageLimitFallbackWait = 30 * time.Second
 
-// invokeWithUsageLimitWait calls invokeClaudeFn and, if a usage limit is hit,
+// invokeWithUsageLimitWait calls invokeAgentFn and, if a usage limit is hit,
 // waits until the reset time before retrying. Non-usage-limit errors and
 // successful results are returned immediately.
-func invokeWithUsageLimitWait(ctx context.Context, opts invokeOpts) (string, error) {
+func invokeWithUsageLimitWait(ctx context.Context, inv agent.AgentInvoker, opts invokeOpts) (string, error) {
 	for {
-		output, err := invokeClaudeFn(ctx, opts)
+		output, err := invokeAgentFn(ctx, inv, opts)
 
-		var ulErr *claude.UsageLimitError
+		var ulErr *agent.UsageLimitError
 		if !errors.As(err, &ulErr) {
 			return output, err
 		}
@@ -135,6 +135,7 @@ func emitWarn(h events.EventHandler, format string, args ...any) {
 
 // Config holds the parameters for a Ralph execution loop.
 type Config struct {
+	Invoker       agent.AgentInvoker
 	MaxIterations int
 	WorkDir       string
 	PRDPath       string
@@ -147,11 +148,14 @@ type Config struct {
 }
 
 // Run executes the Ralph loop: for each iteration, it reads the PRD, picks
-// the next unfinished story, invokes Claude to implement it, and checks for
+// the next unfinished story, invokes the agent to implement it, and checks for
 // the completion signal. When all stories pass, it invokes QA verification.
 // Returns nil when all stories and integration tests are done or an error
 // if max iterations are reached.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.Invoker == nil {
+		return fmt.Errorf("loop config: Invoker is required")
+	}
 	if cfg.MaxIterations <= 0 {
 		cfg.MaxIterations = DefaultMaxIterations
 	}
@@ -248,7 +252,7 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("rendering prompt for %s: %w", story.ID, err)
 		}
 
-		output, err := invokeWithUsageLimitWait(ctx, invokeOpts{
+		output, err := invokeWithUsageLimitWait(ctx, cfg.Invoker, invokeOpts{
 			prompt:       prompt,
 			dir:          cfg.WorkDir,
 			verbose:      cfg.Verbose,
@@ -262,7 +266,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 		emitEvent(cfg.EventHandler, events.PRDRefresh{})
 
-		if claude.ContainsComplete(output) {
+		if agent.ContainsComplete(output) {
 			emitLog(cfg.EventHandler, "Ralph signaled COMPLETE — verifying PRD state")
 
 			// Re-read PRD to verify all stories and integration tests actually pass.
@@ -324,13 +328,13 @@ func runQAVerification(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("rendering QA verification prompt: %w", err)
 	}
 
-	_, err = invokeWithUsageLimitWait(ctx, invokeOpts{
-		prompt:           prompt,
-		dir:              cfg.WorkDir,
-		verbose:          cfg.Verbose,
-		eventHandler:     cfg.EventHandler,
-		isQAVerification: true,
-	})
+		_, err = invokeWithUsageLimitWait(ctx, cfg.Invoker, invokeOpts{
+			prompt:           prompt,
+			dir:              cfg.WorkDir,
+			verbose:          cfg.Verbose,
+			eventHandler:     cfg.EventHandler,
+			isQAVerification: true,
+		})
 	return err
 }
 
@@ -347,13 +351,13 @@ func runQAFix(ctx context.Context, cfg Config, failedTests []prd.IntegrationTest
 		return fmt.Errorf("rendering QA fix prompt: %w", err)
 	}
 
-	_, err = invokeWithUsageLimitWait(ctx, invokeOpts{
-		prompt:       prompt,
-		dir:          cfg.WorkDir,
-		verbose:      cfg.Verbose,
-		eventHandler: cfg.EventHandler,
-		isQAFix:      true,
-	})
+		_, err = invokeWithUsageLimitWait(ctx, cfg.Invoker, invokeOpts{
+			prompt:       prompt,
+			dir:          cfg.WorkDir,
+			verbose:      cfg.Verbose,
+			eventHandler: cfg.EventHandler,
+			isQAFix:      true,
+		})
 	return err
 }
 

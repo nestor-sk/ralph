@@ -21,7 +21,7 @@ During init, Ralph asks two questions:
    - *Track in git* (recommended for teams) — gitignores only ephemeral directories
    - *Keep local* — gitignores the entire `.ralph/` directory
 
-2. **LLM analysis:** optionally uses Claude to auto-detect quality check commands for your project (test runners, linters, type checkers, etc.)
+2. **LLM analysis:** optionally uses the configured agent to auto-detect quality check commands for your project (test runners, linters, type checkers, etc.)
 
 ### What It Creates
 
@@ -33,8 +33,10 @@ During init, Ralph asks two questions:
 | `.ralph/workspaces/` | Workspace directories (gitignored) |
 | `.ralph/state/workspaces.json` | Workspace registry (gitignored) |
 | `.ralph/state/archive/` | Completed PRDs (gitignored) |
-| `.claude/commands/finish.md` | The `/finish` skill for PRD generation |
-| `.claude/CLAUDE.md` | Project rules for the agent |
+| `.claude/commands/finish.md` | The `/finish` command for PRD generation (Claude) |
+| `.claude/CLAUDE.md` | Project rules (Claude) |
+| `.cursor/skills/ralph-commit-rules/SKILL.md` | Commit rules skill (Cursor) |
+| `.cursor/skills/finish/SKILL.md` | PRD finish skill — invoke via `/finish` (Cursor) |
 
 ## Shell Integration
 

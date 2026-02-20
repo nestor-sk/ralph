@@ -10,7 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
+	"github.com/uesteibar/ralph/internal/agent/scaffolds"
 )
 
 func TestInit_GitTrackingOption1_GitignoresWorkspacesAndState(t *testing.T) {
@@ -86,10 +87,10 @@ func TestInit_LLMOptIn_InjectsDetectedChecks(t *testing.T) {
 	defer os.Chdir(origDir)
 	os.Chdir(dir)
 
-	// Mock Claude to return a YAML list of quality checks
-	origInvoker := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvoker }()
-	invokeClaudeFn = func(_ context.Context, opts claude.InvokeOpts) (string, error) {
+	// Mock agent to return a YAML list of quality checks
+	origInvoker := invokeAgentFn
+	defer func() { invokeAgentFn = origInvoker }()
+	invokeAgentFn = func(_ context.Context, _ agent.AgentInvoker, opts agent.InvokeOpts) (string, error) {
 		if !opts.Print {
 			t.Error("expected Print mode")
 		}
@@ -109,10 +110,10 @@ func TestInit_LLMOptIn_InjectsDetectedChecks(t *testing.T) {
 
 	content := string(data)
 	if !strings.Contains(content, "go test ./...") {
-		t.Error("config should contain 'go test ./...' from Claude detection")
+		t.Error("config should contain 'go test ./...' from agent detection")
 	}
 	if !strings.Contains(content, "go vet ./...") {
-		t.Error("config should contain 'go vet ./...' from Claude detection")
+		t.Error("config should contain 'go vet ./...' from agent detection")
 	}
 }
 
@@ -122,11 +123,11 @@ func TestInit_LLMOptIn_FallsBackOnClaudeFailure(t *testing.T) {
 	defer os.Chdir(origDir)
 	os.Chdir(dir)
 
-	// Mock Claude to fail
-	origInvoker := invokeClaudeFn
-	defer func() { invokeClaudeFn = origInvoker }()
-	invokeClaudeFn = func(_ context.Context, _ claude.InvokeOpts) (string, error) {
-		return "", fmt.Errorf("claude: command not found")
+	// Mock agent to fail
+	origInvoker := invokeAgentFn
+	defer func() { invokeAgentFn = origInvoker }()
+	invokeAgentFn = func(_ context.Context, _ agent.AgentInvoker, _ agent.InvokeOpts) (string, error) {
+		return "", fmt.Errorf("agent: command not found")
 	}
 
 	in := strings.NewReader("1\nY\n")
@@ -143,7 +144,7 @@ func TestInit_LLMOptIn_FallsBackOnClaudeFailure(t *testing.T) {
 
 	content := string(data)
 	if !strings.Contains(content, "npm test") {
-		t.Error("config should contain default 'npm test' when Claude fails")
+		t.Error("config should contain default 'npm test' when agent fails")
 	}
 }
 
@@ -495,7 +496,54 @@ func TestInit_KnowledgeDirectory_Idempotent(t *testing.T) {
 	}
 }
 
+func TestInit_WithCursorAgent_CreatesSkills(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+	os.Chdir(dir)
+
+	os.Setenv("RALPH_AGENT", "cursor")
+	defer os.Unsetenv("RALPH_AGENT")
+
+	in := strings.NewReader("1\nn\n")
+	if err := Init(nil, in); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// Verify ralph-commit-rules skill
+	commitRulesPath := filepath.Join(dir, ".cursor", "skills", "ralph-commit-rules", "SKILL.md")
+	data, err := os.ReadFile(commitRulesPath)
+	if err != nil {
+		t.Fatalf("ralph-commit-rules SKILL.md should exist: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "name: ralph-commit-rules") {
+		t.Error("skill should have name: ralph-commit-rules in frontmatter")
+	}
+	if !strings.Contains(content, "Co-Authored-By") {
+		t.Error("skill should contain Co-Authored-By instruction")
+	}
+
+	// Verify finish skill
+	finishPath := filepath.Join(dir, ".cursor", "skills", "finish", "SKILL.md")
+	data, err = os.ReadFile(finishPath)
+	if err != nil {
+		t.Fatalf("finish SKILL.md should exist: %v", err)
+	}
+	content = string(data)
+	if !strings.Contains(content, "name: finish") {
+		t.Error("skill should have name: finish in frontmatter")
+	}
+	if !strings.Contains(content, "disable-model-invocation: true") {
+		t.Error("finish skill should have disable-model-invocation: true")
+	}
+	if !strings.Contains(content, "featureOverview") {
+		t.Error("finish skill should contain PRD schema with featureOverview")
+	}
+}
+
 func TestFinishSkillContent_ContainsOverviewFields(t *testing.T) {
+	skillBody := scaffolds.FinishSkillBody()
 	tests := []struct {
 		name    string
 		content string
@@ -508,7 +556,7 @@ func TestFinishSkillContent_ContainsOverviewFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if !strings.Contains(finishSkillContent, tt.content) {
+			if !strings.Contains(skillBody, tt.content) {
 				t.Errorf("finishSkillContent should contain %q", tt.content)
 			}
 		})

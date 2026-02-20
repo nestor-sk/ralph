@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/uesteibar/ralph/internal/claude"
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/knowledge"
 	"github.com/uesteibar/ralph/internal/prd"
 	"github.com/uesteibar/ralph/internal/prompts"
@@ -72,7 +72,11 @@ func Chat(args []string) error {
 		return fmt.Errorf("rendering chat prompt: %w", err)
 	}
 
-	_, err = claude.Invoke(context.Background(), claude.InvokeOpts{
+	inv, err := agent.NewInvoker(cfg.Agent)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+	_, err = inv.Invoke(context.Background(), agent.InvokeOpts{
 		Prompt:      prompt,
 		Dir:         wc.WorkDir,
 		Interactive: true,

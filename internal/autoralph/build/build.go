@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/autoralph/ai"
 	"github.com/uesteibar/ralph/internal/autoralph/db"
 	"github.com/uesteibar/ralph/internal/config"
@@ -24,7 +25,7 @@ type Invoker interface {
 // WorkspaceCreator creates a Ralph workspace. Wraps workspace.CreateWorkspace
 // to allow testing without git operations.
 type WorkspaceCreator interface {
-	Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string) error
+	Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string, agentConfigDir string) error
 }
 
 // ConfigLoader loads a Ralph config from a file path.
@@ -104,12 +105,14 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 				Branch:    branch,
 				CreatedAt: time.Now().UTC(),
 			}
+			agentConfigDir := agent.ConfigDirFor(ralphCfg.Agent)
 			if err := cfg.Workspace.Create(
 				context.Background(),
 				project.LocalPath,
 				ws,
 				ralphCfg.Repo.DefaultBase,
 				ralphCfg.CopyToWorktree,
+				agentConfigDir,
 			); err != nil {
 				return fmt.Errorf("creating workspace: %w", err)
 			}

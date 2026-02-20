@@ -129,16 +129,22 @@ func CopyDotRalph(repoPath, worktreePath string) error {
 }
 
 // CopyDotClaude copies the .claude directory from the repo root into the
-// worktree, enabling Claude settings and skills to be available in the
-// isolated environment.
+// worktree. Deprecated: use CopyAgentConfig with agent-specific dir.
 func CopyDotClaude(repoPath, worktreePath string) error {
-	src := filepath.Join(repoPath, ".claude")
-	dst := filepath.Join(worktreePath, ".claude")
+	return CopyAgentConfig(repoPath, worktreePath, ".claude")
+}
+
+// CopyAgentConfig copies the agent config directory (e.g. ".claude", ".cursor")
+// from the repo root into the worktree, enabling agent settings and skills
+// in the isolated workspace.
+func CopyAgentConfig(repoPath, worktreePath, configDir string) error {
+	src := filepath.Join(repoPath, configDir)
+	dst := filepath.Join(worktreePath, configDir)
 
 	info, err := os.Stat(src)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no .claude dir to copy
+			return nil // no dir to copy
 		}
 		return err
 	}

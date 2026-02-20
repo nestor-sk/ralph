@@ -3,7 +3,9 @@
 ## Prerequisites
 
 - **Go 1.25+** (build from source)
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (`claude` CLI) installed and authenticated
+- **Coding agent CLI** — one of:
+  - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (`claude` CLI) — default
+  - **[Cursor CLI](https://cursor.com/docs/cli/overview)** (`agent` CLI)
 - **git** (for worktree operations)
 - **bash** or **zsh** (for shell integration)
 

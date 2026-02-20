@@ -115,7 +115,7 @@ QUEUED -------> REFINING -------> APPROVED -------> BUILDING -------> IN_REVIEW
 ## Prerequisites
 
 - **Go 1.25+** (build from source)
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (`claude` CLI) installed and authenticated
+- **Coding agent CLI** — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) or [Cursor CLI](https://cursor.com/docs/cli/overview) (`agent`); set `agent` in `.ralph/ralph.yaml` or `RALPH_AGENT` env
 - **git** (workspace operations use worktrees)
 - **Node.js 18+** (building the web dashboard)
 - **A Linear account** with an API key

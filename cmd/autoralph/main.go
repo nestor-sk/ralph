@@ -14,8 +14,10 @@ import (
 	"github.com/uesteibar/ralph/internal/autoralph/build"
 	"github.com/uesteibar/ralph/internal/autoralph/ccusage"
 	"github.com/uesteibar/ralph/internal/autoralph/checks"
+	"github.com/uesteibar/ralph/internal/agent"
+	_ "github.com/uesteibar/ralph/internal/claude" // register claude agent
+	_ "github.com/uesteibar/ralph/internal/cursor" // register cursor agent
 	"github.com/uesteibar/ralph/internal/autoralph/complete"
-	"github.com/uesteibar/ralph/internal/claude"
 	"github.com/uesteibar/ralph/internal/autoralph/credentials"
 	"github.com/uesteibar/ralph/internal/autoralph/db"
 	"github.com/uesteibar/ralph/internal/autoralph/feedback"
@@ -280,10 +282,10 @@ func runServe(args []string) error {
 	sm := orchestrator.New(database)
 
 	if hasLinear {
-		invoker := &claudeInvoker{}
+		invoker := &agentInvoker{}
 		// readOnlyInvoker blocks write tools so the AI can only read the
 		// codebase during refinement and iteration — no code changes.
-		readOnlyInvoker := &claudeInvoker{
+		readOnlyInvoker := &agentInvoker{
 			DisallowedTools: []string{"Edit", "Write", "Bash", "NotebookEdit"},
 		}
 		cfgLoader := &configLoaderAdapter{}
@@ -497,7 +499,7 @@ func runServe(args []string) error {
 				gitAuthorEmail: gitEmail,
 			}
 			return pr.NewAction(pr.Config{
-				Invoker:    &claudeInvoker{},
+				Invoker:    &agentInvoker{},
 				Git:        gitOps,
 				Diff:       gitOps,
 				PRD:        &prdReaderAdapter{},
@@ -568,8 +570,11 @@ func runServe(args []string) error {
 		logger.Info("recovered building issues", "count", count)
 	}
 
-	// --- 12. Resolve model name ---
-	modelName := claude.ModelName()
+	// --- 12. Resolve model name (from default agent for dashboard display) ---
+	modelName := ""
+	if inv, err := agent.NewInvoker("claude"); err == nil {
+		modelName = inv.ModelName()
+	}
 	if modelName != "" {
 		logger.Info("resolved model name", "model", modelName)
 	}

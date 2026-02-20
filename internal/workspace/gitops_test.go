@@ -104,7 +104,7 @@ func TestCreateWorkspace_CreatesStructure(t *testing.T) {
 	now := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
 	ws := Workspace{Name: "test-ws", Branch: "ralph/test-ws", CreatedAt: now}
 
-	err = CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil)
+	err = CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil, ".claude")
 	if err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestCreateWorkspace_CopiesDotClaude(t *testing.T) {
 
 	ws := Workspace{Name: "claude-ws", Branch: "ralph/claude-ws", CreatedAt: time.Now()}
 
-	err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil)
+	err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil, ".claude")
 	if err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestCreateWorkspace_CopiesGlobPatterns(t *testing.T) {
 
 	ws := Workspace{Name: "glob-ws", Branch: "ralph/glob-ws", CreatedAt: time.Now()}
 
-	err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, []string{"scripts/setup.sh"})
+	err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, []string{"scripts/setup.sh"}, ".claude")
 	if err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRemoveWorkspace_Cleanup(t *testing.T) {
 	ws := Workspace{Name: "remove-me", Branch: "ralph/remove-me", CreatedAt: time.Now()}
 
 	// Create workspace first.
-	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil); err != nil {
+	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil, ".claude"); err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
 
@@ -340,7 +340,7 @@ func TestCreateWorkspace_ExistingBranch(t *testing.T) {
 
 	// Create workspace from existing branch (resume scenario).
 	ws := Workspace{Name: "existing", Branch: "ralph/existing", CreatedAt: time.Now()}
-	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil); err != nil {
+	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil, ".claude"); err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
 
@@ -392,7 +392,7 @@ func TestCreateWorkspace_NoDotRalphState(t *testing.T) {
 	defaultBranch := strings.TrimSpace(branchOut)
 
 	ws := Workspace{Name: "no-state", Branch: "ralph/no-state", CreatedAt: time.Now()}
-	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil); err != nil {
+	if err := CreateWorkspace(ctx, r, dir, ws, defaultBranch, nil, ".claude"); err != nil {
 		t.Fatalf("CreateWorkspace error: %v", err)
 	}
 

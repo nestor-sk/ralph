@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/uesteibar/ralph/internal/agent"
 	"github.com/uesteibar/ralph/internal/autoralph/build"
 	"github.com/uesteibar/ralph/internal/autoralph/checks"
 	"github.com/uesteibar/ralph/internal/autoralph/complete"
@@ -49,19 +50,30 @@ var (
 	_ feedback.BranchPuller        = (*branchPullerAdapter)(nil)
 	_ rebase.BranchPuller          = (*branchPullerAdapter)(nil)
 	_ ghpoller.GitHubClient        = (*ghclient.Client)(nil)
-	_ invoker.EventInvoker         = (*claudeInvoker)(nil)
+	_ invoker.EventInvoker         = (*agentInvoker)(nil)
 )
 
-// claudeInvoker wraps claude.Invoke to satisfy the Invoker interface used by
-// refine, approve, build, feedback, and pr packages.
-type claudeInvoker struct {
-	// DisallowedTools prevents the AI from using specific tools.
-	// Used to block write operations during read-only phases like refinement.
+// resolveInvoker discovers config from workDir and returns the configured agent.
+func resolveInvoker(workDir string) (agent.AgentInvoker, error) {
+	cfg, err := config.Discover(workDir)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewInvoker(cfg.Agent)
+}
+
+// agentInvoker resolves the agent from config and invokes it. Satisfies the
+// Invoker interface used by refine, approve, build, feedback, and pr packages.
+type agentInvoker struct {
 	DisallowedTools []string
 }
 
-func (c *claudeInvoker) Invoke(ctx context.Context, prompt, dir string) (string, error) {
-	return claude.Invoke(ctx, claude.InvokeOpts{
+func (c *agentInvoker) Invoke(ctx context.Context, prompt, dir string) (string, error) {
+	inv, err := resolveInvoker(dir)
+	if err != nil {
+		return "", err
+	}
+	return inv.Invoke(ctx, agent.InvokeOpts{
 		Prompt:          prompt,
 		Dir:             dir,
 		Print:           true,
@@ -69,8 +81,12 @@ func (c *claudeInvoker) Invoke(ctx context.Context, prompt, dir string) (string,
 	})
 }
 
-func (c *claudeInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string, handler events.EventHandler) (string, error) {
-	return claude.Invoke(ctx, claude.InvokeOpts{
+func (c *agentInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string, handler events.EventHandler) (string, error) {
+	inv, err := resolveInvoker(dir)
+	if err != nil {
+		return "", err
+	}
+	return inv.Invoke(ctx, agent.InvokeOpts{
 		Prompt:          prompt,
 		Dir:             dir,
 		Print:           true,
@@ -83,13 +99,30 @@ func (c *claudeInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string
 type loopRunnerAdapter struct{}
 
 func (l *loopRunnerAdapter) Run(ctx context.Context, cfg worker.LoopConfig) error {
+	ralphCfg, err := config.Discover(cfg.WorkDir)
+	if err != nil {
+		return fmt.Errorf("discovering config: %w", err)
+	}
+	inv, err := agent.NewInvoker(ralphCfg.Agent)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+	promptsDir := cfg.PromptsDir
+	if promptsDir == "" {
+		promptsDir = ralphCfg.PromptsDir()
+	}
+	qualityChecks := cfg.QualityChecks
+	if qualityChecks == nil {
+		qualityChecks = ralphCfg.QualityChecks
+	}
 	return loop.Run(ctx, loop.Config{
+		Invoker:       inv,
 		MaxIterations: cfg.MaxIterations,
 		WorkDir:       cfg.WorkDir,
 		PRDPath:       cfg.PRDPath,
 		ProgressPath:  cfg.ProgressPath,
-		PromptsDir:    cfg.PromptsDir,
-		QualityChecks: cfg.QualityChecks,
+		PromptsDir:    promptsDir,
+		QualityChecks: qualityChecks,
 		KnowledgePath: cfg.KnowledgePath,
 		Verbose:       cfg.Verbose,
 		EventHandler:  cfg.EventHandler,
@@ -169,7 +202,7 @@ type workspaceCreatorAdapter struct {
 	pullFn func(ctx context.Context, r *shell.Runner, branch string) error
 }
 
-func (w *workspaceCreatorAdapter) Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string) error {
+func (w *workspaceCreatorAdapter) Create(ctx context.Context, repoPath string, ws workspace.Workspace, base string, copyPatterns []string, agentConfigDir string) error {
 	r := &shell.Runner{Dir: repoPath}
 	// Prune stale worktree registrations before creating to avoid
 	// "already registered worktree" errors from previous failed attempts.
@@ -181,7 +214,7 @@ func (w *workspaceCreatorAdapter) Create(ctx context.Context, repoPath string, w
 		}
 	}
 
-	return workspace.CreateWorkspace(ctx, r, repoPath, ws, base, copyPatterns)
+	return workspace.CreateWorkspace(ctx, r, repoPath, ws, base, copyPatterns, agentConfigDir)
 }
 
 // gitPullerAdapter resolves the default base branch and pulls it via
