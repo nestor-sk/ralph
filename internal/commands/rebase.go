@@ -116,7 +116,7 @@ func resolveConflicts(ctx context.Context, r *shell.Runner, wc workspace.WorkCon
 		Prompt:   prompt,
 		Dir:      wc.WorkDir,
 		Print:    true,
-		MaxTurns: 30,
+		MaxTurns: 20,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent session ended with error: %v\n", err)

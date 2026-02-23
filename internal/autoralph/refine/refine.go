@@ -12,6 +12,9 @@ import (
 	"github.com/uesteibar/ralph/internal/knowledge"
 )
 
+// maxTurnsRefine limits the number of agentic turns for issue refinement.
+const maxTurnsRefine = 15
+
 // Poster posts a comment on a Linear issue and returns its ID.
 type Poster interface {
 	PostComment(ctx context.Context, linearIssueID, body string) (string, error)
@@ -64,8 +67,8 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 			return fmt.Errorf("rendering refine prompt: %w", err)
 		}
 
-		handler := eventlog.New(database, issue.ID, nil, cfg.OnBuildEvent)
-		response, err := cfg.Invoker.InvokeWithEvents(context.Background(), prompt, project.LocalPath, handler)
+		handler := eventlog.New(database, issue.ID, nil, cfg.OnBuildEvent, nil)
+		response, err := cfg.Invoker.InvokeWithEvents(context.Background(), prompt, project.LocalPath, maxTurnsRefine, handler)
 		if err != nil {
 			return fmt.Errorf("invoking AI: %w", err)
 		}

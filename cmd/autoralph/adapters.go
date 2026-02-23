@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -11,9 +12,11 @@ import (
 	"github.com/uesteibar/ralph/internal/autoralph/build"
 	"github.com/uesteibar/ralph/internal/autoralph/checks"
 	"github.com/uesteibar/ralph/internal/autoralph/complete"
+	"github.com/uesteibar/ralph/internal/autoralph/db"
 	"github.com/uesteibar/ralph/internal/autoralph/feedback"
 	"github.com/uesteibar/ralph/internal/autoralph/ghpoller"
 	"github.com/uesteibar/ralph/internal/autoralph/rebase"
+	"github.com/uesteibar/ralph/internal/autoralph/usagelimit"
 	ghclient "github.com/uesteibar/ralph/internal/autoralph/github"
 	"github.com/uesteibar/ralph/internal/autoralph/invoker"
 	"github.com/uesteibar/ralph/internal/autoralph/linear"
@@ -21,7 +24,6 @@ import (
 	"github.com/uesteibar/ralph/internal/autoralph/worker"
 	"log/slog"
 
-	"github.com/uesteibar/ralph/internal/claude"
 	"github.com/uesteibar/ralph/internal/config"
 	"github.com/uesteibar/ralph/internal/events"
 	"github.com/uesteibar/ralph/internal/gitops"
@@ -48,9 +50,13 @@ var (
 	_ feedback.CommentReactor      = (*ghclient.Client)(nil)
 	_ feedback.IssueCommentReactor = (*ghclient.Client)(nil)
 	_ feedback.BranchPuller        = (*branchPullerAdapter)(nil)
+	_ feedback.PRUpdater           = (*prUpdaterAdapter)(nil)
+	_ checks.PRUpdater             = (*prUpdaterAdapter)(nil)
+	_ pr.GitHubPREditor            = (*ghPREditorAdapter)(nil)
 	_ rebase.BranchPuller          = (*branchPullerAdapter)(nil)
 	_ ghpoller.GitHubClient        = (*ghclient.Client)(nil)
 	_ invoker.EventInvoker         = (*agentInvoker)(nil)
+	_ invoker.EventInvoker         = (*usagelimitInvoker)(nil)
 )
 
 // resolveInvoker discovers config from workDir and returns the configured agent.
@@ -68,7 +74,7 @@ type agentInvoker struct {
 	DisallowedTools []string
 }
 
-func (c *agentInvoker) Invoke(ctx context.Context, prompt, dir string) (string, error) {
+func (c *agentInvoker) Invoke(ctx context.Context, prompt, dir string, maxTurns int) (string, error) {
 	inv, err := resolveInvoker(dir)
 	if err != nil {
 		return "", err
@@ -77,11 +83,12 @@ func (c *agentInvoker) Invoke(ctx context.Context, prompt, dir string) (string, 
 		Prompt:          prompt,
 		Dir:             dir,
 		Print:           true,
+		MaxTurns:        maxTurns,
 		DisallowedTools: c.DisallowedTools,
 	})
 }
 
-func (c *agentInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string, handler events.EventHandler) (string, error) {
+func (c *agentInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string, maxTurns int, handler events.EventHandler) (string, error) {
 	inv, err := resolveInvoker(dir)
 	if err != nil {
 		return "", err
@@ -90,9 +97,62 @@ func (c *agentInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string,
 		Prompt:          prompt,
 		Dir:             dir,
 		Print:           true,
+		MaxTurns:        maxTurns,
 		DisallowedTools: c.DisallowedTools,
 		EventHandler:    handler,
 	})
+}
+
+// fullInvoker combines both Invoke and InvokeWithEvents for the
+// usagelimitInvoker wrapper. The agentInvoker satisfies this interface.
+type fullInvoker interface {
+	Invoke(ctx context.Context, prompt, dir string, maxTurns int) (string, error)
+	InvokeWithEvents(ctx context.Context, prompt, dir string, maxTurns int, handler events.EventHandler) (string, error)
+}
+
+// usagelimitInvoker wraps an invoker with wait-and-retry logic for usage limits.
+// When a usage limit is already known (from another worker), it waits before
+// invoking. When the agent returns agent.UsageLimitError, it records the reset
+// time in shared state and retries after waiting.
+type usagelimitInvoker struct {
+	inner fullInvoker
+	state *usagelimit.State
+}
+
+func (u *usagelimitInvoker) Invoke(ctx context.Context, prompt, dir string, maxTurns int) (string, error) {
+	for {
+		if err := u.state.Wait(ctx); err != nil {
+			return "", err
+		}
+
+		out, err := u.inner.Invoke(ctx, prompt, dir, maxTurns)
+
+		var ulErr *agent.UsageLimitError
+		if errors.As(err, &ulErr) {
+			u.state.Set(ulErr.ResetAt)
+			continue
+		}
+
+		return out, err
+	}
+}
+
+func (u *usagelimitInvoker) InvokeWithEvents(ctx context.Context, prompt, dir string, maxTurns int, handler events.EventHandler) (string, error) {
+	for {
+		if err := u.state.Wait(ctx); err != nil {
+			return "", err
+		}
+
+		out, err := u.inner.InvokeWithEvents(ctx, prompt, dir, maxTurns, handler)
+
+		var ulErr *agent.UsageLimitError
+		if errors.As(err, &ulErr) {
+			u.state.Set(ulErr.ResetAt)
+			continue
+		}
+
+		return out, err
+	}
 }
 
 // loopRunnerAdapter wraps loop.Run to satisfy worker.LoopRunner.
@@ -392,6 +452,30 @@ type branchPullerAdapter struct{}
 func (b *branchPullerAdapter) PullBranch(ctx context.Context, workDir, branch string) error {
 	r := &shell.Runner{Dir: workDir}
 	return gitops.PullFFOnly(ctx, r, branch)
+}
+
+// ghPREditorAdapter wraps ghclient.Client.EditPullRequest (which returns PR, error)
+// to satisfy pr.GitHubPREditor (which returns only error).
+type ghPREditorAdapter struct {
+	client *ghclient.Client
+}
+
+func (g *ghPREditorAdapter) EditPullRequest(ctx context.Context, owner, repo string, prNumber int, title, body string) error {
+	_, err := g.client.EditPullRequest(ctx, owner, repo, prNumber, title, body)
+	return err
+}
+
+// prUpdaterAdapter wraps pr.UpdateDescription to satisfy feedback.PRUpdater.
+type prUpdaterAdapter struct {
+	invoker pr.Invoker
+	diff    pr.DiffStatter
+	prd     pr.PRDReader
+	cfgLoad pr.ConfigLoader
+	editor  pr.GitHubPREditor
+}
+
+func (p *prUpdaterAdapter) UpdateDescription(ctx context.Context, issue db.Issue, project db.Project) {
+	pr.UpdateDescription(ctx, p.invoker, p.diff, p.prd, p.cfgLoad, p.editor, issue, project)
 }
 
 // rebaseRunnerAdapter invokes ralph rebase as a subprocess to satisfy

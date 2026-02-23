@@ -31,6 +31,7 @@ import (
 	"github.com/uesteibar/ralph/internal/autoralph/rebase"
 	"github.com/uesteibar/ralph/internal/autoralph/refine"
 	"github.com/uesteibar/ralph/internal/autoralph/server"
+	"github.com/uesteibar/ralph/internal/autoralph/usagelimit"
 	"github.com/uesteibar/ralph/internal/autoralph/worker"
 	"github.com/uesteibar/ralph/internal/gitops"
 	"github.com/uesteibar/ralph/internal/workspace"
@@ -238,10 +239,11 @@ func runServe(args []string) error {
 		}
 
 		registry[proj.ID] = &projectClients{
-			linear:   lc,
-			github:   gc,
-			gitName:  creds.GitAuthorName,
-			gitEmail: creds.GitAuthorEmail,
+			linear:         lc,
+			github:         gc,
+			gitName:        creds.GitAuthorName,
+			gitEmail:       creds.GitAuthorEmail,
+			githubUsername: creds.GithubUsername,
 		}
 
 		pollerProjects = append(pollerProjects, poller.ProjectInfo{
@@ -281,12 +283,21 @@ func runServe(args []string) error {
 	// --- 6. Orchestrator with transitions ---
 	sm := orchestrator.New(database)
 
+	// Shared usage limit state so all workers coordinate around rate limits.
+	ulState := usagelimit.NewState(logger)
+
 	if hasLinear {
-		invoker := &agentInvoker{}
+		invoker := &usagelimitInvoker{
+			inner: &agentInvoker{},
+			state: ulState,
+		}
 		// readOnlyInvoker blocks write tools so the AI can only read the
 		// codebase during refinement and iteration — no code changes.
-		readOnlyInvoker := &agentInvoker{
-			DisallowedTools: []string{"Edit", "Write", "Bash", "NotebookEdit"},
+		readOnlyInvoker := &usagelimitInvoker{
+			inner: &agentInvoker{
+				DisallowedTools: []string{"Edit", "Write", "Bash", "NotebookEdit"},
+			},
+			state: ulState,
 		}
 		cfgLoader := &configLoaderAdapter{}
 		puller := &gitPullerAdapter{
@@ -327,16 +338,33 @@ func runServe(args []string) error {
 			},
 		})
 
+		// commentCaches holds one CachedCommentClient per project so that
+		// IsApproval and IsIteration share a single FetchIssueComments call
+		// when evaluated sequentially for the same issue.
+		commentCaches := map[string]*approve.CachedCommentClient{}
+		cachedComments := func(projectID string) (*approve.CachedCommentClient, error) {
+			if cc, ok := commentCaches[projectID]; ok {
+				return cc, nil
+			}
+			lc, err := registry.mustLinear(projectID)
+			if err != nil {
+				return nil, err
+			}
+			cc := approve.NewCachedCommentClient(lc)
+			commentCaches[projectID] = cc
+			return cc, nil
+		}
+
 		// REFINING → APPROVED (approval check — must be registered BEFORE iteration)
 		sm.Register(orchestrator.Transition{
 			From: orchestrator.StateRefining,
 			To:   orchestrator.StateApproved,
 			Condition: func(issue db.Issue) bool {
-				lc, err := registry.mustLinear(issue.ProjectID)
+				cc, err := cachedComments(issue.ProjectID)
 				if err != nil {
 					return false
 				}
-				return approve.IsApproval(lc)(issue)
+				return approve.IsApproval(cc)(issue)
 			},
 			Action: func(issue db.Issue, database *db.DB) error {
 				lc, err := registry.mustLinear(issue.ProjectID)
@@ -356,11 +384,11 @@ func runServe(args []string) error {
 			From: orchestrator.StateRefining,
 			To:   orchestrator.StateRefining,
 			Condition: func(issue db.Issue) bool {
-				lc, err := registry.mustLinear(issue.ProjectID)
+				cc, err := cachedComments(issue.ProjectID)
 				if err != nil {
 					return false
 				}
-				return approve.IsIteration(lc)(issue)
+				return approve.IsIteration(cc)(issue)
 			},
 			Action: func(issue db.Issue, database *db.DB) error {
 				lc, err := registry.mustLinear(issue.ProjectID)
@@ -425,9 +453,17 @@ func runServe(args []string) error {
 						Projects:      database,
 						ConfigLoad:    &configLoaderAdapter{},
 						Reactor:       gc,
-						IssueReactor:  gc,
-						BranchPuller:  &branchPullerAdapter{},
-						OnBuildEvent:  onBuildEvent,
+						IssueReactor: gc,
+						PRUpdater: &prUpdaterAdapter{
+							invoker: &usagelimitInvoker{inner: &agentInvoker{}, state: ulState},
+							diff:    gitOps,
+							prd:     &prdReaderAdapter{},
+							cfgLoad: &configLoaderAdapter{},
+							editor:  &ghPREditorAdapter{client: gc},
+						},
+						BranchPuller: &branchPullerAdapter{},
+						OnBuildEvent: onBuildEvent,
+						TrustedUser:  registry.githubUsername(issue.ProjectID),
 					})(issue, database)
 				},
 			})
@@ -455,6 +491,13 @@ func runServe(args []string) error {
 						Git:          gitOps,
 						Projects:     database,
 						ConfigLoad:   &configLoaderAdapter{},
+						PRUpdater: &prUpdaterAdapter{
+							invoker: &usagelimitInvoker{inner: &agentInvoker{}, state: ulState},
+							diff:    gitOps,
+							prd:     &prdReaderAdapter{},
+							cfgLoad: &configLoaderAdapter{},
+							editor:  &ghPREditorAdapter{client: gc},
+						},
 						BranchPuller: &branchPullerAdapter{},
 						OnBuildEvent: onBuildEvent,
 					})(issue, database)
@@ -498,9 +541,9 @@ func runServe(args []string) error {
 				gitAuthorName:  gitName,
 				gitAuthorEmail: gitEmail,
 			}
-			return pr.NewAction(pr.Config{
-				Invoker:    &agentInvoker{},
-				Git:        gitOps,
+					return pr.NewAction(pr.Config{
+						Invoker:    &usagelimitInvoker{inner: &agentInvoker{}, state: ulState},
+						Git:        gitOps,
 				Diff:       gitOps,
 				PRD:        &prdReaderAdapter{},
 				GitHub:     &ghPRCreatorAdapter{client: gc},
@@ -529,13 +572,14 @@ func runServe(args []string) error {
 
 	// --- 8. Build worker dispatcher ---
 	dispatcher := worker.New(worker.Config{
-		DB:            database,
-		MaxWorkers:    maxWorkers,
-		LoopRunner:    &loopRunnerAdapter{},
-		Projects:      database,
-		PR:            prAction,
-		GitIdentityFn: registry.gitIdentity,
-		Logger:        logger,
+		DB:               database,
+		MaxWorkers:       maxWorkers,
+		LoopRunner:       &loopRunnerAdapter{},
+		Projects:         database,
+		PR:               prAction,
+		GitIdentityFn:    registry.gitIdentity,
+		UsageLimitSetter: ulState,
+		Logger:           logger,
 		OnBuildEvent: func(issueID, detail string) {
 			if hub == nil {
 				return
@@ -561,7 +605,7 @@ func runServe(args []string) error {
 
 	// --- 10. Orchestrator evaluation loop ---
 	wake := make(chan struct{}, 1)
-	go runOrchestratorLoop(ctx, sm, database, dispatcher, hub, logger, wake)
+	go runOrchestratorLoop(ctx, sm, database, dispatcher, hub, logger, wake, ulState)
 
 	// --- 11. Recover BUILDING issues from previous run ---
 	if count, err := dispatcher.RecoverBuilding(ctx); err != nil {
@@ -637,6 +681,7 @@ func runOrchestratorLoop(
 	hub *server.Hub,
 	logger *slog.Logger,
 	wake <-chan struct{},
+	ulState *usagelimit.State,
 ) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -665,10 +710,17 @@ func runOrchestratorLoop(
 				continue
 			}
 
+			// Check if usage limit is active -- skip AI-driven dispatches to
+			// avoid wasting worker slots on invocations that will immediately wait.
+			limitActive := ulState != nil && ulState.IsActive()
+
 			// Re-dispatch BUILDING issues that aren't actively running.
 			// This handles retries (state set back to building via API)
 			// without requiring a process restart.
 			if issue.State == string(orchestrator.StateBuilding) && !dispatcher.IsRunning(issue.ID) {
+				if limitActive {
+					continue
+				}
 				if err := dispatcher.Dispatch(ctx, issue); err != nil {
 					logger.Warn("re-dispatching building issue", "issue", issue.Identifier, "error", err)
 				} else {
@@ -691,6 +743,9 @@ func runOrchestratorLoop(
 
 			// Async transitions: dispatch via worker instead of blocking.
 			if isAsyncTransition(tr) {
+				if limitActive {
+					continue
+				}
 				if dispatcher.IsRunning(issue.ID) {
 					continue
 				}
@@ -861,10 +916,11 @@ func dispatchAsync(
 // projectClients holds the per-project Linear, GitHub, and git identity
 // clients resolved at startup.
 type projectClients struct {
-	linear   *linear.Client
-	github   *ghclient.Client
-	gitName  string
-	gitEmail string
+	linear         *linear.Client
+	github         *ghclient.Client
+	gitName        string
+	gitEmail       string
+	githubUsername string
 }
 
 // clientRegistry maps project IDs to their resolved clients.
@@ -892,6 +948,14 @@ func (r clientRegistry) gitIdentity(projectID string) (name, email string) {
 		return "", ""
 	}
 	return c.gitName, c.gitEmail
+}
+
+func (r clientRegistry) githubUsername(projectID string) string {
+	c, ok := r[projectID]
+	if !ok {
+		return ""
+	}
+	return c.githubUsername
 }
 
 // isTerminalState returns true for states that should not be evaluated by the
