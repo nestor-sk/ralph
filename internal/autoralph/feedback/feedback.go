@@ -19,6 +19,9 @@ import (
 	"github.com/uesteibar/ralph/internal/workspace"
 )
 
+// maxTurnsFeedback limits the number of agentic turns for addressing feedback.
+const maxTurnsFeedback = 30
+
 // CommentFetcher fetches line-specific review comments from a GitHub PR.
 type CommentFetcher interface {
 	FetchPRComments(ctx context.Context, owner, repo string, prNumber int) ([]github.Comment, error)
@@ -52,6 +55,11 @@ type CommentReactor interface {
 // IssueCommentReactor adds emoji reactions to general PR/issue comments.
 type IssueCommentReactor interface {
 	ReactToIssueComment(ctx context.Context, owner, repo string, commentID int64, reaction string) error
+}
+
+// PRUpdater updates the PR description after changes are pushed.
+type PRUpdater interface {
+	UpdateDescription(ctx context.Context, issue db.Issue, project db.Project)
 }
 
 // BranchPuller pulls the latest remote branch state into the local worktree.
@@ -90,10 +98,16 @@ type Config struct {
 	ConfigLoad    ConfigLoader
 	Reactor       CommentReactor       // for line comment reactions
 	IssueReactor  IssueCommentReactor  // optional: for issue comment reactions
+	PRUpdater     PRUpdater            // optional: updates PR description after commit+push
 	EventHandler  events.EventHandler
 	OnBuildEvent  func(issueID, detail string)
 	OverrideDir   string
+	TrustedUser   string // GitHub username of the trusted reviewer (empty = no trust annotation)
 }
+
+// defaultCommitMessage is used when the AI response cannot be parsed for a
+// descriptive commit message.
+const defaultCommitMessage = "Address review feedback"
 
 // commentSource identifies where a feedback item originated.
 type commentSource int
@@ -104,13 +118,21 @@ const (
 	sourceIssueComment                      // general PR/issue comment
 )
 
-// feedbackItem is a normalized piece of feedback from any source.
-type feedbackItem struct {
-	id     int64
-	path   string // empty for non-line feedback
+// replyItem holds a reply attached to a parent feedback comment.
+type replyItem struct {
 	author string
 	body   string
-	source commentSource
+}
+
+// feedbackItem is a normalized piece of feedback from any source.
+type feedbackItem struct {
+	id        int64
+	path      string // empty for non-line feedback
+	author    string
+	body      string
+	source    commentSource
+	replies   []replyItem
+	isTrusted bool
 }
 
 func (f feedbackItem) isInline() bool {
@@ -159,16 +181,28 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 			return nil
 		}
 
+		// Annotate trusted user if configured.
+		annotateTrust(items, cfg.TrustedUser)
+
 		// React 👀 to each feedback item before invoking AI.
 		reactToFeedback(ctx, cfg, project.GithubOwner, project.GithubRepo, items)
 
 		// Build AI prompt data from all feedback items.
 		var aiComments []ai.AddressFeedbackComment
 		for _, item := range items {
+			var replies []ai.CommentReply
+			for _, r := range item.replies {
+				replies = append(replies, ai.CommentReply{
+					Author: r.author,
+					Body:   r.body,
+				})
+			}
 			aiComments = append(aiComments, ai.AddressFeedbackComment{
-				Path:   item.path,
-				Author: item.author,
-				Body:   item.body,
+				Path:      item.path,
+				Author:    item.author,
+				Body:      item.body,
+				Replies:   replies,
+				IsTrusted: item.isTrusted,
 			})
 		}
 
@@ -179,24 +213,32 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 		}
 
 		prompt, err := ai.RenderAddressFeedback(ai.AddressFeedbackData{
-			Comments:      aiComments,
-			QualityChecks: qualityChecks,
-			KnowledgePath: knowledge.Dir(treePath),
+			Comments:       aiComments,
+			QualityChecks:  qualityChecks,
+			KnowledgePath:  knowledge.Dir(treePath),
+			HasTrustedUser: cfg.TrustedUser != "",
 		}, cfg.OverrideDir)
 		if err != nil {
 			return fmt.Errorf("rendering feedback prompt: %w", err)
 		}
 
-		handler := eventlog.New(database, issue.ID, cfg.EventHandler, cfg.OnBuildEvent)
-		aiResponse, err := cfg.Invoker.InvokeWithEvents(ctx, prompt, treePath, handler)
+		handler := eventlog.New(database, issue.ID, cfg.EventHandler, cfg.OnBuildEvent, nil)
+		aiResponse, err := cfg.Invoker.InvokeWithEvents(ctx, prompt, treePath, maxTurnsFeedback, handler)
 		if err != nil {
 			return fmt.Errorf("invoking AI: %w", err)
+		}
+
+		// Build a descriptive commit message from the AI response.
+		commitTitle, commitBody := extractCommitSummary(aiResponse)
+		commitMessage := commitTitle
+		if commitBody != "" {
+			commitMessage = commitTitle + "\n\n" + commitBody
 		}
 
 		// Try to commit and push. If nothing changed (e.g., AI only
 		// provided explanations), skip commit/push gracefully.
 		committed := false
-		if err := cfg.Git.Commit(ctx, treePath, "Address review feedback"); err != nil {
+		if err := cfg.Git.Commit(ctx, treePath, commitMessage); err != nil {
 			if !isNothingToCommit(err) {
 				return fmt.Errorf("committing changes: %w", err)
 			}
@@ -205,6 +247,11 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 				return fmt.Errorf("pushing changes: %w", err)
 			}
 			committed = true
+		}
+
+		// Update PR description after successful commit+push.
+		if committed && cfg.PRUpdater != nil {
+			cfg.PRUpdater.UpdateDescription(ctx, issue, project)
 		}
 
 		// Build reply reference from commit SHA.
@@ -240,20 +287,12 @@ func NewAction(cfg Config) func(issue db.Issue, database *db.DB) error {
 func gatherFeedback(ctx context.Context, cfg Config, owner, repo string, prNumber int) ([]feedbackItem, error) {
 	var items []feedbackItem
 
-	// 1. Line-specific review comments.
+	// 1. Line-specific review comments (grouped with reply threads).
 	comments, err := cfg.Comments.FetchPRComments(ctx, owner, repo, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("fetching PR comments: %w", err)
 	}
-	for _, c := range filterTopLevel(comments) {
-		items = append(items, feedbackItem{
-			id:     c.ID,
-			path:   c.Path,
-			author: c.User,
-			body:   c.Body,
-			source: sourceLineComment,
-		})
-	}
+	items = append(items, groupThreads(comments)...)
 
 	// 2. Review submission bodies (optional).
 	if cfg.Reviews != nil {
@@ -344,15 +383,51 @@ func replyToFeedback(ctx context.Context, cfg Config, owner, repo string, prNumb
 	return nil
 }
 
-// filterTopLevel returns only comments that are not replies (InReplyTo == 0).
-func filterTopLevel(comments []github.Comment) []github.Comment {
-	var result []github.Comment
+// groupThreads groups comments into top-level feedback items with their replies
+// attached. A comment with InReplyTo == 0 is a top-level comment; otherwise it
+// is a reply that gets attached to its parent. Only top-level comments become
+// actionable feedbackItems.
+func groupThreads(comments []github.Comment) []feedbackItem {
+	// Index top-level comments by ID.
+	indexByID := make(map[int64]int) // comment ID -> index in result
+	var result []feedbackItem
 	for _, c := range comments {
 		if c.InReplyTo == 0 {
-			result = append(result, c)
+			indexByID[c.ID] = len(result)
+			result = append(result, feedbackItem{
+				id:     c.ID,
+				path:   c.Path,
+				author: c.User,
+				body:   c.Body,
+				source: sourceLineComment,
+			})
+		}
+	}
+	// Attach replies to their parent.
+	for _, c := range comments {
+		if c.InReplyTo != 0 {
+			if idx, ok := indexByID[c.InReplyTo]; ok {
+				result[idx].replies = append(result[idx].replies, replyItem{
+					author: c.User,
+					body:   c.Body,
+				})
+			}
 		}
 	}
 	return result
+}
+
+// annotateTrust marks feedback items whose author matches trustedUser as trusted.
+// When trustedUser is empty, no annotations are applied.
+func annotateTrust(items []feedbackItem, trustedUser string) {
+	if trustedUser == "" {
+		return
+	}
+	for i := range items {
+		if strings.EqualFold(items[i].author, trustedUser) {
+			items[i].isTrusted = true
+		}
+	}
 }
 
 // isBot returns true if the username looks like a GitHub App bot (e.g. "my-app[bot]").
@@ -399,6 +474,121 @@ func buildReplyForComment(aiResponse, path, commitRef string) string {
 		return trimmed
 	}
 	return "Reviewed — no code changes needed."
+}
+
+// changeEntry represents a single changed item parsed from the AI response.
+type changeEntry struct {
+	path     string
+	response string
+}
+
+// extractCommitSummary parses the AI's structured response to build a
+// descriptive commit message. It returns a title (≤72 chars) and an optional
+// body (≤~500 chars). When parsing fails or no changes were made, it returns
+// the default static message with an empty body.
+func extractCommitSummary(aiResponse string) (title, body string) {
+	entries := parseChangedEntries(aiResponse)
+	if len(entries) == 0 {
+		return defaultCommitMessage, ""
+	}
+
+	if len(entries) == 1 {
+		return truncate(entries[0].response, 72), ""
+	}
+
+	// Title: combine responses into a comma-separated summary.
+	var summaryParts []string
+	for _, e := range entries {
+		summaryParts = append(summaryParts, e.response)
+	}
+	title = truncate(strings.Join(summaryParts, ", "), 72)
+
+	// Body: list individual changes with file paths.
+	var bodyLines []string
+	for _, e := range entries {
+		bodyLines = append(bodyLines, fmt.Sprintf("- %s: %s", e.path, e.response))
+	}
+	body = truncate(strings.Join(bodyLines, "\n"), 500)
+
+	return title, body
+}
+
+// parseChangedEntries extracts all "### <path> / **Action:** changed / **Response:** <desc>"
+// sections from the AI response.
+func parseChangedEntries(response string) []changeEntry {
+	var entries []changeEntry
+	remaining := response
+	for {
+		idx := strings.Index(remaining, "### ")
+		if idx < 0 {
+			break
+		}
+		remaining = remaining[idx+4:]
+
+		// Extract the path (until end of line).
+		eol := strings.Index(remaining, "\n")
+		if eol < 0 {
+			break
+		}
+		path := strings.TrimSpace(remaining[:eol])
+		remaining = remaining[eol:]
+
+		// Look for **Action:** on the next relevant line.
+		actionMarker := "**Action:**"
+		actionIdx := strings.Index(remaining, actionMarker)
+		if actionIdx < 0 {
+			continue
+		}
+		// Check if this action belongs to the current section (before the next ### marker).
+		nextSection := strings.Index(remaining, "\n### ")
+		if nextSection >= 0 && actionIdx > nextSection {
+			continue
+		}
+
+		afterAction := remaining[actionIdx+len(actionMarker):]
+		actionEOL := strings.Index(afterAction, "\n")
+		var actionValue string
+		if actionEOL >= 0 {
+			actionValue = strings.TrimSpace(afterAction[:actionEOL])
+		} else {
+			actionValue = strings.TrimSpace(afterAction)
+		}
+
+		if actionValue != "changed" {
+			continue
+		}
+
+		// Extract **Response:** value.
+		respMarker := "**Response:**"
+		respIdx := strings.Index(afterAction, respMarker)
+		if respIdx < 0 {
+			continue
+		}
+		afterResp := strings.TrimSpace(afterAction[respIdx+len(respMarker):])
+
+		// Take first line of the response as the summary.
+		respEOL := strings.Index(afterResp, "\n")
+		var respValue string
+		if respEOL >= 0 {
+			// Check if the next line is a new section.
+			respValue = strings.TrimSpace(afterResp[:respEOL])
+		} else {
+			respValue = strings.TrimSpace(afterResp)
+		}
+
+		if respValue != "" {
+			entries = append(entries, changeEntry{path: path, response: respValue})
+		}
+	}
+	return entries
+}
+
+// truncate shortens s to maxLen characters, appending "..." if truncation occurs.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // extractSection pulls the **Response:** content for a given file path from
